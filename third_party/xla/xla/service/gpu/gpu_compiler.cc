@@ -257,6 +257,7 @@ limitations under the License.
 #include "xla/service/conditional_simplifier.h"
 #include "xla/service/copy_insertion.h"
 #include "xla/service/cpu/cpu_aot_compilation_result.h"
+#include "xla/service/cpu/executable.pb.h"
 #include "xla/service/cpu_gpu_shape_verifier.h"
 #include "xla/service/debug/unstable_reduction_detector.h"
 #include "xla/service/device_assignment.h"
@@ -269,6 +270,7 @@ limitations under the License.
 #include "xla/service/gpu/alias_info.h"
 #include "xla/service/gpu/autotuning/autotuner_cache.h"
 #include "xla/service/gpu/autotuning/config_assigner_pass.h"
+#include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/compile_module_to_llvm_ir.h"
 #include "xla/service/gpu/conv_layout_normalization.h"
 #include "xla/service/gpu/cublas_cudnn.h"
@@ -288,6 +290,7 @@ limitations under the License.
 #include "xla/service/gpu/hlo_fusion_stats.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/kernel_reuse_cache.h"
+#include "xla/service/gpu/kernel_reuse_cache.pb.h"
 #include "xla/service/gpu/matmul_utils.h"
 #include "xla/service/gpu/metrics.h"
 #include "xla/service/gpu/model/collective_ptable_stats_collection.h"
@@ -1755,6 +1758,11 @@ bool RequiresCollectiveScheduleLinearizer(const HloModule* module,
   return false;
 }
 
+bool IsNonCudaPlatform(const GpuTargetConfig& gpu_target_config) {
+  return gpu_target_config.platform_name == "ROCM" ||
+         gpu_target_config.platform_name == "SYCL";
+}
+
 }  // namespace
 
 bool GpuCompiler::IsScaledDotSupportedByBackend(
@@ -1771,7 +1779,7 @@ bool GpuCompiler::IsScaledDotSupportedByBackend(
 
 AlgebraicSimplifierOptions GpuCompiler::GetAlgebraicSimplifierOptions(
     AlgebraicSimplifierMode mode, const DebugOptions& debug_options,
-    bool is_rocm) {
+    bool is_non_cuda_platform) {
   AlgebraicSimplifierOptions opts;
 
   opts.set_enable_dot_strength_reduction(false);
@@ -1785,7 +1793,8 @@ AlgebraicSimplifierOptions GpuCompiler::GetAlgebraicSimplifierOptions(
   opts.set_enable_conditional_simplification(true);
   opts.set_enable_fold_transpose_into_scatter(true);
 
-  if (!is_rocm && debug_options.xla_gpu_experimental_enable_conv_fusion()) {
+  if (!is_non_cuda_platform &&
+      debug_options.xla_gpu_experimental_enable_conv_fusion()) {
     opts.set_enable_folding_pad_into_convolution(false);
     opts.set_enable_conv_operand_swap(false);
   }
@@ -1804,7 +1813,7 @@ AlgebraicSimplifierOptions GpuCompiler::GetAlgebraicSimplifierOptions(
       // the transpose.
       opts.set_rewrite_reshape_transpose_as_slice_concatenate(false);
       opts.set_enable_hoist_transpose_of_reshape(true);
-      if (is_rocm) {
+      if (is_non_cuda_platform) {
         opts.set_enable_conv_operand_swap(false);
       }
       break;
@@ -1875,7 +1884,7 @@ absl::Status GpuCompiler::OptimizeHloModule(
       GetAlgebraicSimplifierOptions(
           AlgebraicSimplifierMode::kLayoutInsensitive,
           hlo_module->config().debug_options(),
-          gpu_topology.gpu_target_config().platform_name == "ROCM");
+          IsNonCudaPlatform(gpu_topology.gpu_target_config()));
 
   {
     HloPassPipeline pipeline("annotate-host-compute", compilation_stats);
@@ -1945,7 +1954,7 @@ absl::Status GpuCompiler::OptimizeHloModule(
       GetAlgebraicSimplifierOptions(
           AlgebraicSimplifierMode::kLayoutNormalization,
           hlo_module->config().debug_options(),
-          gpu_topology.gpu_target_config().platform_name == "ROCM"),
+          IsNonCudaPlatform(gpu_topology.gpu_target_config())),
       gpu_version, compilation_stats));
 
   // Run target-specific HLO optimization passes after layout assignment.
@@ -1970,7 +1979,7 @@ absl::Status GpuCompiler::OptimizeHloModule(
       GetAlgebraicSimplifierOptions(
           AlgebraicSimplifierMode::kPostFusionSimplification,
           hlo_module->config().debug_options(),
-          gpu_topology.gpu_target_config().platform_name == "ROCM"),
+          IsNonCudaPlatform(gpu_topology.gpu_target_config())),
       gpu_version, gpu_topology.gpu_target_config(), compilation_stats));
 
   ABSL_RETURN_IF_ERROR(RunPostFusionVerificationPasses(
@@ -2046,6 +2055,11 @@ void AddGemmRewriterPasses(HloPassPipeline& pipeline,
     bias_mode = GemmRewriterOptions::BiasMode::kNoBias;
   }
 
+  // Decompose FP8xN dot algorithms into F8E4M3FN dots before the FP8
+  // GemmRewriter lowers them to cuBLASLt (see b/576656261 for Triton lowering
+  // and b/576655907 for cuDNN fusion).
+  pipeline.AddPass<DotAlgorithmRewriter>(gpu_version, /*fp8xn_only=*/true);
+
   GemmRewriterOptions fp8_options{GemmRewriterOptions::DType::kFp8Only,
                                   bias_mode};
   pipeline.AddPass<GemmRewriter>(gpu_version, toolkit_version, fp8_options);
@@ -2083,7 +2097,7 @@ absl::Status GpuCompiler::OptimizeHloPostLayoutAssignment(
       GetAlgebraicSimplifierOptions(
           AlgebraicSimplifierMode::kPostLayoutAssignment,
           hlo_module->config().debug_options(),
-          gpu_target_config.platform_name == "ROCM");
+          IsNonCudaPlatform(gpu_target_config));
   // Lambdas and related constants:
   const GpuFloatSupport bf16_support(gpu_version, BF16);
   const GpuFloatSupport f8e5m2_support(gpu_version, F8E5M2, F16);
@@ -2316,7 +2330,7 @@ absl::Status GpuCompiler::OptimizeHloPostLayoutAssignment(
             "remove-no-op-reduce-precision-algebraic-simplifier");
     AlgebraicSimplifierOptions options = GetAlgebraicSimplifierOptions(
         AlgebraicSimplifierMode::kAfterSimplifyFPConversions, debug_options,
-        gpu_target_config.platform_name == "ROCM");
+        IsNonCudaPlatform(gpu_target_config));
     remove_no_op_reduce_precision_pipeline
         .AddPass<HloPassFix<GpuAlgebraicSimplifier>>(options, gpu_version);
   }
@@ -3243,7 +3257,12 @@ absl::Status GpuCompiler::RunPostSchedulingPipelines(
 
   const auto* cuda_cc =
       gpu_device_info.gpu_compute_capability().cuda_compute_capability();
-  if (cuda_cc != nullptr && cuda_cc->IsAtLeastAmpere()) {
+  const auto* rocm_cc =
+      gpu_device_info.gpu_compute_capability().rocm_compute_capability();
+  // TODO(anurmukh) Enable on gfx12 once Triton block level fusions are
+  // validated there.
+  if ((cuda_cc != nullptr && cuda_cc->IsAtLeastAmpere()) ||
+      (rocm_cc != nullptr && rocm_cc->gfx9_mi300_series())) {
     // This needs to run after every pass affecting fusions. The last passes
     // that create new fusions are FusionWrapper and StreamAttributeAnnotator.
     main_pipeline.AddPass<HloPassPipeline>(

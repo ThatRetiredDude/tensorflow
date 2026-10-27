@@ -355,11 +355,9 @@ cc_library(
         "//xla/tsl/lib/io:zlib_outputbuffer",
         "//xla/tsl/lib/strings:proto_serialization",
         "//xla/tsl/platform:env",
-        "//xla/tsl/platform:errors",
         "//xla/util/split_proto:split_hlo_writer",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/functional:any_invocable",
@@ -371,17 +369,14 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/synchronization",
-        "@com_google_absl//absl/types:span",
         "@com_google_protobuf//:protobuf",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Transforms",
-        "@riegeli//riegeli/bytes:fd_writer",
         "@riegeli//riegeli/bytes:writer",
         "@tsl//tsl/platform",
         "@tsl//tsl/platform:path",
         "@tsl//tsl/platform:protobuf",
-        "@tsl//tsl/platform:regexp",
         "@tsl//tsl/profiler/lib:scoped_annotation",
     ] + if_google([
         "@com_google_absl//absl/base:builddata",
@@ -1643,6 +1638,7 @@ cc_library(
         "//xla/backends/gpu/runtime:__subpackages__",
         "//xla/backends/gpu/tests:__pkg__",
         "//xla/backends/gpu/transforms:__subpackages__",
+        "//xla/stream_executor/sycl:__pkg__",
         "//third_party/pathways/configuration:__subpackages__",
     ]),
     deps = [
@@ -5409,7 +5405,6 @@ cc_library(
         ":call_inliner",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/pass:hlo_pass",
-        "//xla/tsl/platform:errors",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
@@ -5905,7 +5900,6 @@ xla_cc_binary(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@tsl//tsl/platform:platform_port",
-        "@tsl//tsl/platform:types",
     ] + if_cuda_or_rocm_is_configured([
         # keep sorted
         ":gpu_plugin",
@@ -6040,6 +6034,18 @@ xla_aot_compile_gpu(
     ]),
 )
 
+xla_aot_compile_gpu(
+    name = "xla_aot_compile_test_gpu_executable_fmha_deviceless_cudnn",
+    gpu_targets = [
+        "h100",
+        "h100_mig",
+        "b200",
+        "b200_mig",
+    ],
+    module = "xla_aot_compile_test_fmha.hlo",
+    xla_flags = "--xla_gpu_cudnn_deviceless_compilation_mode=CUDNN_DEVICELESS_COMPILATION_AUTO",
+)
+
 xla_aot_compile_gpu_runtime_autotuning(
     name = "xla_aot_compile_test_gpu_executable_convolution_runtime_autotuning",
     gpu_target_config = "//xla/backends/gpu/target_config:specs/h100_sxm.txtpb",
@@ -6124,6 +6130,7 @@ xla_test(
         ":xla_aot_compile_test_gpu_executable_convolution",
         ":xla_aot_compile_test_gpu_executable_convolution_deviceless_cudnn",
         ":xla_aot_compile_test_gpu_executable_convolution_legacy_cache",
+        ":xla_aot_compile_test_gpu_executable_fmha_deviceless_cudnn",
         ":xla_aot_compile_test_gpu_executable_hlo",
         ":xla_aot_compile_test_gpu_executable_hlo_legacy_cache",
         ":xla_aot_compile_test_gpu_executable_legacy_cache",
@@ -6138,6 +6145,7 @@ xla_test(
         ":hlo_runner_pjrt",
         "//xla:literal",
         "//xla:literal_util",
+        "//xla:types",
         "//xla/backends/gpu/tests:hlo_pjrt_gpu_test_base",
         "//xla/stream_executor/cuda:cudnn_plugin",
         "//xla/tsl/platform:env",
